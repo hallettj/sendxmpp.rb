@@ -1,0 +1,88 @@
+#!/usr/bin/env ruby
+
+# This script will send a jabber message to the specified JID. The subject can be
+# specified using the '-s' option, and the message will be taken from stdin.
+
+require 'optparse'
+require 'xmpp4r'
+require 'xmpp4r/roster/helper/roster'
+
+# Load configuration from ~/.sendxmpprc
+config = File.open(File.join(ENV['HOME'], ".sendxmpprc"), 'r') { |f| f.read }
+if config =~ /([^\s;:]+)(?:;([^:\s]*))?(?::([^\s]*))?\s+([^\s]+)/
+  myJID      = Jabber::JID.new($1)
+  myServer   = $2
+  myPort     = $3
+  myPassword = $4
+else
+  raise "Could not read configuration from ~/.sendxmpprc"
+end
+
+# Parse command arguments.
+subject = ''
+OptionParser.new do |opts|
+  opts.banner = 'Usage: sendxmpp [options] <recipient> [<recipient2> ...]'
+  opts.separator ''
+  opts.on('-s', '--subject SUBJECT', 'sets the message\'s subject') { |s| subject = s }
+  opts.on_tail('-h', '--help', 'Show this message') {
+    puts opts
+    exit(0)
+  }
+  opts.parse!(ARGV)
+end
+recipients = ARGV.map do |jid|
+  Jabber::JID.new(jid)
+end
+
+# Check that the required parameters were set.
+if recipients.empty?
+  puts "No receiver specified. See sendxmpp -h"
+  exit(1)
+end
+
+# Prepare the message body.
+body = STDIN.readlines.join
+
+# connect to jabber server
+client = Jabber::Client.new(myJID)
+client.connect(myServer, myPort)
+client.auth(myPassword)
+
+# Initialize a roster instance.
+roster = Jabber::Roster::Helper.new(client)
+
+# Sends a message.
+send_message = lambda { |recipient|
+  m = Jabber::Message.new(recipient, body).set_type(:chat).set_id('1').set_subject(subject)
+  client.send(m)
+}
+
+# Wait for authorization to send messages to each recipient. Send each message
+# once authorization is received. The program will exit after messages are
+# delivered to all recipients.
+finished = false
+roster.add_update_callback { |olditem, item|
+  recipient = recipients.detect { |r| r == item.jid }
+  if recipient && [:to, :both].include?(item.subscription)
+    send_message.call(item.jid)
+    recipients.delete(recipient)
+    finished = true if recipients.empty?
+  end
+}
+
+# Send initial presence.  this is important for receiving presence of
+# subscribed users.
+client.send(Jabber::Presence.new.set_show(:chat).set_status('Bringing important updates to your screen.'))
+
+recipients.each do |recipient|
+  pres = Jabber::Presence.new.set_type(:subscribe).set_to(recipient)
+  client.send(pres)
+end
+
+# Main loop:
+while not finished
+  roster.wait_for_roster
+end
+
+client.close
+exit(0)
